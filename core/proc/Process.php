@@ -4,6 +4,8 @@ namespace core\proc;
 use core\events\Libevent;
 use core\events\Select;
 use core\events\EventInterface;
+use core\mem\Shm;
+use core\mem\Msgqueue;
 
 class Process {
 
@@ -12,8 +14,10 @@ class Process {
 	public static $child;
 	public static $alias;
 	public static $shm_to_pid;
-	private static $shm_basic_key = 1024;
-	private static $max_child_idx = 0;
+	public static $user_events;
+	public static $shm;
+
+	public static $shm_basic_id;
 
 	// public static $shm_to_parent;
 	public static $events;
@@ -25,9 +29,9 @@ class Process {
 		self::$ppid = \posix_getppid();
 		self::$child = array();
 		self::$alias = array();
+		self::$user_events = array();
 		self::$shm_to_pid = array();
-		self::$shm_basic_key *= 2;
-		self::$max_child_idx = 0;
+		
 
 		// self::$shm_to_parent = -1;
 
@@ -39,6 +43,7 @@ class Process {
 			} else {
 			    self::$events = new Select();
 			}
+			self::$shm = new Shm(__FILE__, 'a');
 
 			// 注册用户信号SIGUSR1处理函数
 			self::onSysEvent(SIGUSR1, EventInterface::EV_SIGNAL, array("\\core\\proc\\Process", 'defaultSigusr1Cbk'));
@@ -49,7 +54,7 @@ class Process {
 
 			// 注册exit回调函数
 			register_shutdown_function(function(){
-				Process::delShmAlloc();
+				Process::closeShm();
 			});
 			self::$do_once = true;
 		}
@@ -57,7 +62,7 @@ class Process {
 
 	public static function fork($alias, $callback, $params = array())
 	{
-		$shm_id = self::shmAlloc();
+		
 		$pid = \pcntl_fork();
 
 		if ($pid < 0) {
@@ -66,22 +71,23 @@ class Process {
 			// child
 			self::init();
 			sleep(1);
-			self::$shm_to_pid[self::$ppid] = $shm_id;
-
 			call_user_func_array($callback, $params);
 			exit(0);
 		} elseif ($pid > 0) {
 			// parent
 			self::$child[] = $pid;
-			self::$max_child_idx++;
 			self::$alias[$alias] = $pid;
-			self::$shm_to_pid[$pid] = $shm_id;
 		}
 	}
 
-	public static function sendMsg($alias, $data)
+	public static function sendMsg($alia, $msg)
 	{
-		
+		if (!isset(self::$alias[$alia])) {
+			return false;
+		}
+		$pid = self::$alias[$alia];
+		Msgqueue::push($pid, $msg);
+		self::postSignal(SIGUSR1, $pid);
 	}
 
 
@@ -105,23 +111,12 @@ class Process {
 		self::$events->add($fd, $flag, $func, $args);
 	}
 
-	public static function shmAlloc($size = 1024)
-	{
-		$shm_id = \shmop_open(self::$shm_basic_key + self::$max_child_idx, 'c', 0666, $size);
-		return $shm_id;
-	}
-
-	public static function delShmAlloc()
-	{
-		foreach (self::$shm_to_pid as $pid => $shm_id) {
-			shmop_close($shm_id);
-		}
-	}
 
 	public static function defaultSigusr1Cbk($fd, $events, $args)
 	{
-		echo "fd:$fd\n";
-		echo "events:$events\n";
+		while(($msg = Msgqueue::shift(self::$pid))) {
+			var_dump($msg);
+		}
 	}
 
 	public static function defaultSigusr2Cbk($fd, $events, $args)
@@ -143,6 +138,7 @@ class Process {
 					}
 				}
 			}
+			Msgqueue::delQueue($pid);
 		}
 		if (count(self::$child) == 0) {
 			exit;
@@ -152,6 +148,12 @@ class Process {
 	public static function loop()
 	{
 		self::$events->loop();
+	}
+
+	public static function closeShm()
+	{
+		file_put_contents("a.txt", 'data111111');
+		self::$shm->close();
 	}
 }
 

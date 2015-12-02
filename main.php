@@ -25,15 +25,14 @@ require_once("vendor/autoload.php");
 
 
 use core\proc\Process;
-
+ini_set('memory_limit', '256M');
 Process::init();
 Process::fork('test1', function(){
-    file_get_contents("http://www.baidu.com");
-    echo 1;
+    Process::loop();
 });
 
 
-print_r(Process::$child);
-print_r(Process::$child);
 
-// Process::loop();
+// Process::sendMsg('test1', (array('msgtype' => 'command', 'msgname' => 'test', 'msgparam' => 'this is a test')));
+
+Process::loop();
