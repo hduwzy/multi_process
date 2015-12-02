@@ -1,60 +1,158 @@
 <?php
+
 namespace core\proc;
+use core\events\Libevent;
+use core\events\Select;
+use core\events\EventInterface;
 
-// 进程管理
-// 父子进程通信
-// 套接字监听
+class Process {
 
-abstract class Process {
+	public static $pid;
+	public static $ppid;
+	public static $child;
+	public static $alias;
+	public static $shm_to_pid;
+	private static $shm_basic_key = 1024;
+	private static $max_child_idx = 0;
 
-	private static $_instance;
-	private $_pm;
+	// public static $shm_to_parent;
+	public static $events;
+	public static $do_once = false;
 
-	private function __construct()
+	public static function init()
 	{
-		$this->_pm = new ProcessM($this);
+		self::$pid = \posix_getpid();
+		self::$ppid = \posix_getppid();
+		self::$child = array();
+		self::$alias = array();
+		self::$shm_to_pid = array();
+		self::$shm_basic_key *= 2;
+		self::$max_child_idx = 0;
+
+		// self::$shm_to_parent = -1;
+
+		
+		if (!self::$do_once) {
+			// 初始化事件对象
+			if(extension_loaded('libevent')) {
+			    self::$events = new Libevent();
+			} else {
+			    self::$events = new Select();
+			}
+
+			// 注册用户信号SIGUSR1处理函数
+			self::onSysEvent(SIGUSR1, EventInterface::EV_SIGNAL, array("\\core\\proc\\Process", 'defaultSigusr1Cbk'));
+			// 注册子进程退出处理函数
+			self::onSysEvent(SIGCHLD, EventInterface::EV_SIGNAL, array("\\core\\proc\\Process", 'defaultSigchldCbk'));
+			// 注册用户信号SIGUSR2处理函数
+			self::onSysEvent(SIGUSR2, EventInterface::EV_SIGNAL, array("\\core\\proc\\Process", 'defaultSigusr2Cbk'));
+
+			// 注册exit回调函数
+			register_shutdown_function(function(){
+				Process::delShmAlloc();
+			});
+			self::$do_once = true;
+		}
 	}
 
-	public static function getInstance($is_master = false)
+	public static function fork($alias, $callback, $params = array())
 	{
-		if (null === self::$_instance) {
-			self::$_instance = new static();
-			if ($is_master) {
-				self::$_instance->getProcManager()->setAliasPid('slef', \posix_getpid());
+		$shm_id = self::shmAlloc();
+		$pid = \pcntl_fork();
+
+		if ($pid < 0) {
+			exit(-1);
+		} elseif ($pid == 0) {
+			// child
+			self::init();
+			sleep(1);
+			self::$shm_to_pid[self::$ppid] = $shm_id;
+
+			call_user_func_array($callback, $params);
+			exit(0);
+		} elseif ($pid > 0) {
+			// parent
+			self::$child[] = $pid;
+			self::$max_child_idx++;
+			self::$alias[$alias] = $pid;
+			self::$shm_to_pid[$pid] = $shm_id;
+		}
+	}
+
+	public static function sendMsg($alias, $data)
+	{
+		
+	}
+
+
+	public static function postSignal($sig, $pid)
+	{
+		return \posix_kill($pid, $sig);
+	}
+
+	public static function registerUserEvent($ev_name, $ev_call)
+	{
+
+	}
+
+	public static function fireUserEvent($ev_name)
+	{
+
+	}
+
+	public static function onSysEvent($fd, $flag, $func, $args=array())
+	{
+		self::$events->add($fd, $flag, $func, $args);
+	}
+
+	public static function shmAlloc($size = 1024)
+	{
+		$shm_id = \shmop_open(self::$shm_basic_key + self::$max_child_idx, 'c', 0666, $size);
+		return $shm_id;
+	}
+
+	public static function delShmAlloc()
+	{
+		foreach (self::$shm_to_pid as $pid => $shm_id) {
+			shmop_close($shm_id);
+		}
+	}
+
+	public static function defaultSigusr1Cbk($fd, $events, $args)
+	{
+		echo "fd:$fd\n";
+		echo "events:$events\n";
+	}
+
+	public static function defaultSigusr2Cbk($fd, $events, $args)
+	{
+		
+	}
+
+	public static function defaultSigchldCbk($fd, $events, $args)
+	{
+		$status = '';
+		while(($pid = \pcntl_waitpid(-1, $status)) > 0) {
+			foreach (self::$child as $key => $value) {
+				if ($value == $pid) {
+					unset(self::$child[$key]);
+					foreach (self::$alias as $key => $value) {
+						if ($pid == $value) {
+							unset(self::$alias[$key]);
+						}
+					}
+				}
 			}
 		}
-		return self::$_instance;
+		if (count(self::$child) == 0) {
+			exit;
+		}
 	}
 
-	public function setProcManager(ProcessM $pm)
+	public static function loop()
 	{
-		$this->_pm = $pm;
+		self::$events->loop();
 	}
-
-	public function getProcManager()
-	{
-		return $this->_pm;
-	}
-
-	public function forkChild($alias, $child_porc, $params = array())
-	{
-		return $this->_pm->forkChild($alias, $child_porc, $params);
-	}
-
-	public function monitorChildren()
-	{
-		$this->_pm->monitorChildren();
-	}
-
-	public function start()
-	{
-		$this->run();
-	}
-
-	public function getPMInfo()
-	{
-		return $this->_pm;
-	}
-
-	abstract public function run();
 }
+
+
